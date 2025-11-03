@@ -1,17 +1,16 @@
 const PP = window.parent;
 let latestPng = null;
 
-const statusEl     = document.getElementById('status');
-const apiKeyEl     = document.getElementById('apiKey');
-const promptEl     = document.getElementById('prompt');
-const countEl      = document.getElementById('count');
-const modelSelect  = document.getElementById('modelSelect');
-const customModelEl= document.getElementById('customModel');
-const refreshBtn   = document.getElementById('refreshModels');
+const statusEl      = document.getElementById('status');
+const apiKeyEl      = document.getElementById('apiKey');
+const promptEl      = document.getElementById('prompt');
+const countEl       = document.getElementById('count');
+const modelSelect   = document.getElementById('modelSelect');
+const customModelEl = document.getElementById('customModel');
+const refreshBtn    = document.getElementById('refreshModels');
 
 function setStatus(t) { statusEl.textContent = t; }
 
-// Basic fallback list in case listing fails
 const FALLBACK_MODELS = [
   "gemini-2.5-flash-image",
   "gemini-2.0-flash-preview-image",
@@ -59,7 +58,7 @@ document.getElementById('generate').onclick = async () => {
       const outBuf = await generateOneWithBackoff(apiKey, chosen, promptEl.value || 'Enhance image', b64);
       PP.postMessage(outBuf, '*');
       setStatus(`Inserted image ${i + 1}/${count}`);
-      await delay(6500); // stay under common free-tier RPM
+      await delay(6500); // be nice to free-tier RPM
     }
 
     setStatus(`Done: ${count} image(s) inserted`);
@@ -72,30 +71,35 @@ document.getElementById('generate').onclick = async () => {
 async function loadModels(apiKey) {
   setStatus('Listing models...');
   modelSelect.innerHTML = '';
-  let models = [];
+  let list = [];
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`List models HTTP ${resp.status}`);
-    const json = await resp.json();
-    models = (json.models || [])
-      .filter(m => Array.isArray(m.supported_actions) && m.supported_actions.includes('generateContent'))
-      .map(m => m.name.split('/').pop());
+    const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+      headers: { 'x-goog-api-key': apiKey }
+    });
+    const txt = await resp.text();
+    if (!resp.ok) throw new Error(`List models HTTP ${resp.status}: ${txt}`);
+    const json = JSON.parse(txt || '{}');
+    const arr = Array.isArray(json.models) ? json.models : [];
+    list = arr
+      .filter(m => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
+      .map(m => (m.name || '').split('/').pop())
+      .filter(Boolean);
   } catch (e) {
-    console.warn('List models failed, using fallback', e);
-    models = FALLBACK_MODELS;
+    console.warn('List models failed', e);
   }
-  // Deduplicate + sort
+  if (list.length === 0) {
+    list = [...FALLBACK_MODELS];
+    setStatus('Models endpoint returned none; using fallback list');
+  }
   const seen = new Set();
-  models.forEach(m => { if (!seen.has(m)) { seen.add(m); } });
-  const list = Array.from(seen).sort();
-  list.forEach(m => {
+  list.forEach(m => { if (!seen.has(m)) seen.add(m); });
+  const unique = Array.from(seen).sort();
+  unique.forEach(m => {
     const opt = document.createElement('option');
-    opt.value = m;
-    opt.textContent = m;
+    opt.value = m; opt.textContent = m;
     modelSelect.appendChild(opt);
   });
-  setStatus(`Models ready (${list.length})`);
+  setStatus(`Models ready (${unique.length})`);
 }
 
 async function generateOneWithBackoff(apiKey, modelId, prompt, inputB64) {
@@ -105,7 +109,6 @@ async function generateOneWithBackoff(apiKey, modelId, prompt, inputB64) {
       return await generateOne(apiKey, modelId, prompt, inputB64);
     } catch (e) {
       attempt++;
-      // Simple 429/RetryInfo handling
       const msg = String(e && e.message || '');
       if (msg.includes('HTTP 429')) {
         const delaySec = parseRetryDelaySeconds(msg) || 40;
@@ -125,7 +128,6 @@ async function generateOne(apiKey, modelId, prompt, inputB64) {
     contents: [{
       parts: [
         { text: prompt },
-        // Send current canvas; many models support image-guided generation/edits
         { inline_data: { mime_type: 'image/png', data: inputB64 } }
       ]
     }]
@@ -174,5 +176,3 @@ function base64ToArrayBuffer(base64) {
 }
 
 function delay(ms) { return new Promise(res => setTimeout(res, ms)); }
-
-// Auto-load models when API key is present and user clicks refresh
