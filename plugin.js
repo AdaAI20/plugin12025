@@ -1,12 +1,23 @@
 const PP = window.parent;
 let latestPng = null;
 
-const statusEl = document.getElementById('status');
-const apiKeyEl = document.getElementById('apiKey');
-const promptEl = document.getElementById('prompt');
-const countEl  = document.getElementById('count');
+const statusEl     = document.getElementById('status');
+const apiKeyEl     = document.getElementById('apiKey');
+const promptEl     = document.getElementById('prompt');
+const countEl      = document.getElementById('count');
+const modelSelect  = document.getElementById('modelSelect');
+const customModelEl= document.getElementById('customModel');
+const refreshBtn   = document.getElementById('refreshModels');
 
 function setStatus(t) { statusEl.textContent = t; }
+
+// Basic fallback list in case listing fails
+const FALLBACK_MODELS = [
+  "gemini-2.5-flash-image",
+  "gemini-2.0-flash-preview-image",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro"
+];
 
 window.addEventListener('message', (e) => {
   const data = e.data;
@@ -24,23 +35,31 @@ document.getElementById('export').onclick = () => {
   PP.postMessage('app.activeDocument.saveToOE("png");', '*');
 };
 
+refreshBtn.onclick = async () => {
+  const key = apiKeyEl.value.trim();
+  if (!key) { setStatus('Enter GEMINI_API_KEY first'); return; }
+  await loadModels(key);
+};
+
 document.getElementById('generate').onclick = async () => {
   try {
     const apiKey = apiKeyEl.value.trim();
     if (!apiKey) { setStatus('Enter GEMINI_API_KEY'); return; }
     if (!latestPng) { setStatus('Export the canvas first'); return; }
 
+    const chosen = (customModelEl.value.trim() || modelSelect.value || "").trim();
+    if (!chosen) { setStatus('Pick a model or enter a custom ID'); return; }
+
     const count = Math.max(1, Math.min(6, parseInt(countEl.value || '1', 10)));
-    setStatus(`Contacting Gemini for ${count} image(s)...`);
+    setStatus(`Calling ${chosen} for ${count} image(s)...`);
 
     const b64 = arrayBufferToBase64(latestPng);
 
     for (let i = 0; i < count; i++) {
-      const outBuf = await generateOne(apiKey, promptEl.value || 'Enhance image', b64);
+      const outBuf = await generateOneWithBackoff(apiKey, chosen, promptEl.value || 'Enhance image', b64);
       PP.postMessage(outBuf, '*');
       setStatus(`Inserted image ${i + 1}/${count}`);
-      // Gentle pacing for free-tier rate limits
-      await delay(600);
+      await delay(6500); // stay under common free-tier RPM
     }
 
     setStatus(`Done: ${count} image(s) inserted`);
@@ -50,12 +69,63 @@ document.getElementById('generate').onclick = async () => {
   }
 };
 
-async function generateOne(apiKey, prompt, inputB64) {
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent';
+async function loadModels(apiKey) {
+  setStatus('Listing models...');
+  modelSelect.innerHTML = '';
+  let models = [];
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`List models HTTP ${resp.status}`);
+    const json = await resp.json();
+    models = (json.models || [])
+      .filter(m => Array.isArray(m.supported_actions) && m.supported_actions.includes('generateContent'))
+      .map(m => m.name.split('/').pop());
+  } catch (e) {
+    console.warn('List models failed, using fallback', e);
+    models = FALLBACK_MODELS;
+  }
+  // Deduplicate + sort
+  const seen = new Set();
+  models.forEach(m => { if (!seen.has(m)) { seen.add(m); } });
+  const list = Array.from(seen).sort();
+  list.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    modelSelect.appendChild(opt);
+  });
+  setStatus(`Models ready (${list.length})`);
+}
+
+async function generateOneWithBackoff(apiKey, modelId, prompt, inputB64) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await generateOne(apiKey, modelId, prompt, inputB64);
+    } catch (e) {
+      attempt++;
+      // Simple 429/RetryInfo handling
+      const msg = String(e && e.message || '');
+      if (msg.includes('HTTP 429')) {
+        const delaySec = parseRetryDelaySeconds(msg) || 40;
+        setStatus(`429 from ${modelId}, waiting ${delaySec}s before retry #${attempt}...`);
+        await delay(delaySec * 1000);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+async function generateOne(apiKey, modelId, prompt, inputB64) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent`;
+
   const body = {
     contents: [{
       parts: [
         { text: prompt },
+        // Send current canvas; many models support image-guided generation/edits
         { inline_data: { mime_type: 'image/png', data: inputB64 } }
       ]
     }]
@@ -70,16 +140,19 @@ async function generateOne(apiKey, prompt, inputB64) {
     body: JSON.stringify(body)
   });
 
-  if (!resp.ok) {
-    const txt = await resp.text();
-    throw new Error(`Gemini HTTP ${resp.status}: ${txt}`);
-  }
+  const txt = await resp.text();
+  if (!resp.ok) throw new Error(`Gemini HTTP ${resp.status}: ${txt}`);
 
-  const json = await resp.json();
+  const json = JSON.parse(txt);
   const parts = json?.candidates?.[0]?.content?.parts || [];
   const imgPart = parts.find(p => p.inline_data && p.inline_data.data);
-  if (!imgPart) throw new Error('No image in response');
+  if (!imgPart) throw new Error('No image in response (model might be text-only)');
   return base64ToArrayBuffer(imgPart.inline_data.data);
+}
+
+function parseRetryDelaySeconds(msg) {
+  const m = msg.match(/\"retryDelay\"\s*:\s*\"(\d+)s\"/i);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 function arrayBufferToBase64(buf) {
@@ -100,6 +173,6 @@ function base64ToArrayBuffer(base64) {
   return bytes.buffer;
 }
 
-function delay(ms) {
-  return new Promise(res => setTimeout(res, ms));
-}
+function delay(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+// Auto-load models when API key is present and user clicks refresh
