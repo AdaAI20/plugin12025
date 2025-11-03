@@ -19,7 +19,15 @@
     <h3>Gemini Image</h3>
 
     <div class="row">
-      <input id="apiKey" type="password" placeholder="GEMINI_API_KEY (from AI Studio)" />
+      <label for="provider">Provider</label>
+      <select id="provider">
+        <option value="google">Google AI Studio (Gemini)</option>
+        <option value="openrouter">OpenRouter (OpenAI‑compatible)</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <input id="apiKey" type="password" placeholder="API key (Google or OpenRouter)" />
     </div>
 
     <div class="row">
@@ -30,7 +38,7 @@
 
     <div class="row">
       <label for="customModel">Custom model ID (optional)</label>
-      <input id="customModel" type="text" placeholder="e.g., gemini-2.5-flash-image" />
+      <input id="customModel" type="text" placeholder="e.g., gemini-2.5-flash-image or google/gemini-2.5-pro" />
       <small>If set, this overrides the dropdown selection.</small>
     </div>
 
